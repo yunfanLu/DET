@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# @Time    : 2019/12/26 20:08
+# @Time    : 2019/12/27 10:39
 # @Author  : yunfan
 
 """Train Faster-RCNN end to end."""
@@ -8,6 +8,13 @@ import os
 
 # disable autotune
 os.environ['MXNET_CUDNN_AUTOTUNE_DEFAULT'] = '0'
+os.environ['MXNET_GPU_MEM_POOL_TYPE'] = 'Round'
+os.environ['MXNET_GPU_MEM_POOL_ROUND_LINEAR_CUTOFF'] = '26'
+os.environ['MXNET_EXEC_BULK_EXEC_MAX_NODE_TRAIN_FWD'] = '999'
+os.environ['MXNET_EXEC_BULK_EXEC_MAX_NODE_TRAIN_BWD'] = '25'
+os.environ['MXNET_GPU_COPY_NTHREADS'] = '1'
+os.environ['MXNET_OPTIMIZER_AGGREGATION_SIZE'] = '54'
+
 import logging
 import time
 import numpy as np
@@ -16,6 +23,7 @@ from mxnet import gluon
 from mxnet import autograd
 from mxnet.contrib import amp
 import gluoncv as gcv
+gcv.utils.check_version('0.6.0')
 from gluoncv import data as gdata
 from gluoncv import utils as gutils
 from gluoncv.model_zoo import get_model
@@ -27,7 +35,7 @@ from gluoncv.utils.metrics.coco_detection import COCODetectionMetric
 from gluoncv.utils.parallel import Parallelizable, Parallel
 from gluoncv.utils.metrics.rcnn import RPNAccMetric, RPNL1LossMetric, RCNNAccMetric, \
     RCNNL1LossMetric
-
+from ChangEDataset import ChangEDET
 try:
     import horovod.mxnet as hvd
 except ImportError:
@@ -36,6 +44,7 @@ except ImportError:
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Faster-RCNN networks e2e.')
+    parser.add_argument('--root', type=str, default='/home/yf/data/7-moon/5_CE2_50m_DOM_DEM_Sample_Data')
     parser.add_argument('--network', type=str, default='resnet50_v1b',
                         help="Base network name which serves as feature extraction base.")
     parser.add_argument('--dataset', type=str, default='voc',
@@ -44,7 +53,7 @@ def parse_args():
                         default=4, help='Number of data workers, you can use larger '
                                         'number to accelerate data loading, '
                                         'if your CPU and GPUs are powerful.')
-    parser.add_argument('--batch-size', type=int, default=8, help='Training mini-batch size.')
+    parser.add_argument('--batch-size', type=int, default=1, help='Training mini-batch size.')
     parser.add_argument('--gpus', type=str, default='0',
                         help='Training with GPUs, you can specify 1,3 for example.')
     parser.add_argument('--epochs', type=str, default='',
@@ -125,20 +134,13 @@ def parse_args():
             raise SystemExit("Horovod not found, please check if you installed it correctly.")
         hvd.init()
 
-
     if args.dataset == 'voc':
         args.epochs = int(args.epochs) if args.epochs else 20
         args.lr_decay_epoch = args.lr_decay_epoch if args.lr_decay_epoch else '14,20'
         args.lr = float(args.lr) if args.lr else 0.001
         args.lr_warmup = args.lr_warmup if args.lr_warmup else -1
         args.wd = float(args.wd) if args.wd else 5e-4
-    elif args.dataset == 'coco':
-        args.epochs = int(args.epochs) if args.epochs else 26
-        args.lr_decay_epoch = args.lr_decay_epoch if args.lr_decay_epoch else '17,23'
-        args.lr = float(args.lr) if args.lr else 0.01
-        args.lr_warmup = args.lr_warmup if args.lr_warmup else 1000
-        args.wd = float(args.wd) if args.wd else 1e-4
-    elif args.dataset == 'change':
+    elif args.dataset == 'coco' or args.dataset == 'change':
         args.epochs = int(args.epochs) if args.epochs else 26
         args.lr_decay_epoch = args.lr_decay_epoch if args.lr_decay_epoch else '17,23'
         args.lr = float(args.lr) if args.lr else 0.01
@@ -159,9 +161,9 @@ def get_dataset(dataset, args):
         val_dataset = gdata.COCODetection(splits='instances_val2017', skip_empty=False)
         val_metric = COCODetectionMetric(val_dataset, args.save_prefix + '_eval', cleanup=True)
     elif dataset.lower() == 'change':
-        train_dataset = None
-        val_dataset = None
-        val_metric = COCODetectionMetric(val_dataset, args.save_prefix + '_eval', cleanup=True)
+        train_dataset = ChangEDET(args.root, train=True, depth=False, transform=None)
+        val_dataset = ChangEDET(args.root, train=True, depth=False, transform=None)
+        val_metric = VOC07MApMetric(iou_thresh=0.5, class_names=val_dataset.CLASSES)
     else:
         raise NotImplementedError('Dataset: {} not implemented.'.format(dataset))
     if args.mixup:
@@ -330,6 +332,8 @@ def train(net, train_data, val_data, eval_metric, batch_size, ctx, args):
     net.collect_params().setattr('grad_req', 'null')
     net.collect_train_params().setattr('grad_req', 'write')
     optimizer_params = {'learning_rate': args.lr, 'wd': args.wd, 'momentum': args.momentum}
+    if args.amp:
+         optimizer_params['multi_precision'] = True
     if args.horovod:
         hvd.broadcast_parameters(net.collect_params(), root_rank=0)
         trainer = hvd.DistributedTrainer(
@@ -466,6 +470,8 @@ def train(net, train_data, val_data, eval_metric, batch_size, ctx, args):
 
 
 if __name__ == '__main__':
+    import pudb
+    pudb.set_trace()
     import sys
 
     sys.setrecursionlimit(1100)
@@ -485,6 +491,8 @@ if __name__ == '__main__':
 
     # network
     kwargs = {}
+    if args.dataset == 'change':
+        kwargs['classes'] = ChangEDET.CLASSES
     module_list = []
     if args.use_fpn:
         module_list.append('fpn')
@@ -492,10 +500,11 @@ if __name__ == '__main__':
         module_list.append(args.norm_layer)
         if args.norm_layer == 'bn':
             kwargs['num_devices'] = len(args.gpus.split(','))
-    net_name = '_'.join(('faster_rcnn', *module_list, args.network, args.dataset))
+    num_gpus = hvd.size() if args.horovod else len(ctx)
+    net_name = args.network
     args.save_prefix += net_name
-    net = get_model(net_name, pretrained_base=True,
-                    per_device_batch_size=args.batch_size // len(ctx), **kwargs)
+    net = get_model(net_name, pretrained_base=True, per_device_batch_size=args.batch_size // num_gpus, **kwargs)
+    # gcv.model_zoo.get_model('ssd_512_mobilenet1.0_custom', classes=classes, pretrained_base=False, transfer='voc')
     if args.resume.strip():
         net.load_parameters(args.resume.strip())
     else:
@@ -505,9 +514,16 @@ if __name__ == '__main__':
             param.initialize()
     net.collect_params().reset_ctx(ctx)
 
+    if args.amp:
+        # Cast both weights and gradients to 'float16'
+        net.cast('float16')
+        # This layers doesn't support type 'float16'
+        net.collect_params('.*batchnorm.*').setattr('dtype', 'float32')
+        net.collect_params('.*normalizedperclassboxcenterencoder.*').setattr('dtype', 'float32')
+
     # training data
     train_dataset, val_dataset, eval_metric = get_dataset(args.dataset, args)
-    batch_size = args.batch_size // len(ctx) if args.horovod else args.batch_size
+    batch_size = args.batch_size // num_gpus if args.horovod else args.batch_size
     train_data, val_data = get_dataloader(
         net, train_dataset, val_dataset, FasterRCNNDefaultTrainTransform,
         FasterRCNNDefaultValTransform, batch_size, len(ctx), args)

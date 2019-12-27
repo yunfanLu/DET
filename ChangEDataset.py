@@ -14,12 +14,12 @@ import mxnet as mx
 import pandas
 from gluoncv.data.base import VisionDataset
 
-class MoonLabelMeDetection(VisionDataset):
+class ChangEDET(VisionDataset):
 
     CLASSES = ['hole',]
 
     def __init__(self, root, train=True, depth=False, transform=None):
-        super(MoonLabelMeDetection, self).__init__(root)
+        super(ChangEDET, self).__init__(root)
         self.depth = depth
         self.train = train
         self.items = self.load_items(root)
@@ -66,7 +66,7 @@ class MoonLabelMeDetection(VisionDataset):
         test_load_folders = []
         for i, folder in enumerate(folders):
             idx = i % 10
-            if idx > 3:
+            if idx > 2:
                 train_load_folders.append(folder)
             else:
                 test_load_folders.append(folder)
