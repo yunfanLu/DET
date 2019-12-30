@@ -50,7 +50,7 @@ def parse_args():
     parser.add_argument('--dataset', type=str, default='voc',
                         help='Training dataset. Now support voc and coco.')
     parser.add_argument('--num-workers', '-j', dest='num_workers', type=int,
-                        default=4, help='Number of data workers, you can use larger '
+                        default=1, help='Number of data workers, you can use larger '
                                         'number to accelerate data loading, '
                                         'if your CPU and GPUs are powerful.')
     parser.add_argument('--batch-size', type=int, default=1, help='Training mini-batch size.')
@@ -162,8 +162,8 @@ def get_dataset(dataset, args):
         val_metric = COCODetectionMetric(val_dataset, args.save_prefix + '_eval', cleanup=True)
     elif dataset.lower() == 'change':
         train_dataset = ChangEDET(args.root, train=True, depth=False, transform=None)
-        val_dataset = ChangEDET(args.root, train=True, depth=False, transform=None)
-        val_metric = VOC07MApMetric(iou_thresh=0.5, class_names=val_dataset.CLASSES)
+        val_dataset = ChangEDET(args.root, train=False, depth=False, transform=None)
+        val_metric = VOC07MApMetric(iou_thresh=0.5, class_names=val_dataset.classes)
     else:
         raise NotImplementedError('Dataset: {} not implemented.'.format(dataset))
     if args.mixup:
@@ -185,8 +185,9 @@ def get_dataloader(net, train_dataset, val_dataset, train_transform, val_transfo
                                                 num_parts=hvd.size() if args.horovod else 1,
                                                 part_index=hvd.rank() if args.horovod else 0,
                                                 shuffle=True)
-    train_loader = mx.gluon.data.DataLoader(train_dataset.transform(
-        train_transform(net.short, net.max_size, net, ashape=net.ashape, multi_stage=args.use_fpn)),
+    data_train_transform = train_transform(net.short, net.max_size, net, ashape=net.ashape, multi_stage=args.use_fpn)
+    train_dataset_transformed = train_dataset.transform(data_train_transform)
+    train_loader = mx.gluon.data.DataLoader(train_dataset_transformed,
         batch_sampler=train_sampler, batchify_fn=train_bfn, num_workers=args.num_workers)
     val_bfn = Tuple(*[Append() for _ in range(3)])
     short = net.short[-1] if isinstance(net.short, (tuple, list)) else net.short
@@ -470,8 +471,8 @@ def train(net, train_data, val_data, eval_metric, batch_size, ctx, args):
 
 
 if __name__ == '__main__':
-    import pudb
-    pudb.set_trace()
+    # import pudb
+    # pudb.set_trace()
     import sys
 
     sys.setrecursionlimit(1100)
@@ -487,12 +488,14 @@ if __name__ == '__main__':
         ctx = [mx.gpu(hvd.local_rank())]
     else:
         ctx = [mx.gpu(int(i)) for i in args.gpus.split(',') if i.strip()]
-        ctx = ctx if ctx else [mx.cpu()]
+        ctx = ctx if ctx else [mx.cpu()] # [gpu(0), gpu(1)]
+    # dataset
+    train_dataset, val_dataset, eval_metric = get_dataset(args.dataset, args)
 
     # network
     kwargs = {}
     if args.dataset == 'change':
-        kwargs['classes'] = ChangEDET.CLASSES
+        kwargs = {'classes': train_dataset.classes}
     module_list = []
     if args.use_fpn:
         module_list.append('fpn')
@@ -504,7 +507,6 @@ if __name__ == '__main__':
     net_name = args.network
     args.save_prefix += net_name
     net = get_model(net_name, pretrained_base=True, per_device_batch_size=args.batch_size // num_gpus, **kwargs)
-    # gcv.model_zoo.get_model('ssd_512_mobilenet1.0_custom', classes=classes, pretrained_base=False, transfer='voc')
     if args.resume.strip():
         net.load_parameters(args.resume.strip())
     else:
@@ -522,7 +524,6 @@ if __name__ == '__main__':
         net.collect_params('.*normalizedperclassboxcenterencoder.*').setattr('dtype', 'float32')
 
     # training data
-    train_dataset, val_dataset, eval_metric = get_dataset(args.dataset, args)
     batch_size = args.batch_size // num_gpus if args.horovod else args.batch_size
     train_data, val_data = get_dataloader(
         net, train_dataset, val_dataset, FasterRCNNDefaultTrainTransform,
