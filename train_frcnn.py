@@ -44,7 +44,7 @@ except ImportError:
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Faster-RCNN networks e2e.')
-    parser.add_argument('--root', type=str, default='/home/yf/data/7-moon/5_CE2_50m_DOM_DEM_Sample_Data')
+    parser.add_argument('--root', type=str, default='')
     parser.add_argument('--network', type=str, default='resnet50_v1b',
                         help="Base network name which serves as feature extraction base.")
     parser.add_argument('--dataset', type=str, default='voc',
